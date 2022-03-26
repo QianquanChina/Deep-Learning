@@ -1,0 +1,10 @@
+ClassificationNetwork/*/runs
+ClassificationNetwork/*/test
+ClassificationNetwork/*/data
+ClassificationNetwork/*/*.pth
+ClassificationNetwork/*/*.json
+ClassificationNetwork/*/weights
+ClassificationNetwork/*/data_set
+ClassificationNetwork/*/plot_img
+ClassificationNetwork/*/__pycache__
+
