@@ -1,10 +1,12 @@
-ClassificationNetwork/*/runs
-ClassificationNetwork/*/test
-ClassificationNetwork/*/data
-ClassificationNetwork/*/*.pth
-ClassificationNetwork/*/*.json
-ClassificationNetwork/*/weights
-ClassificationNetwork/*/data_set
-ClassificationNetwork/*/plot_img
-ClassificationNetwork/*/__pycache__
+*/*/runs
+*/*/test
+*/*/data
+*/*/*.pth
+*/*/*.json
+*/*/weights
+*/*/data_set
+*/*/plot_img
+*/*/__pycache__
+*/DataSet
+*/segmenter
 
