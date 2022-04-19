@@ -1,8 +1,12 @@
-import numpy as np
-import torch.utils.data
 import torch
-a = torch.tensor([[1], [2], [6]])
-print(a.shape)
-print( torch.max(a, 1)[1] )
+import collections 
+from model import LenNet
+
+weights = torch.load( './LenNet.pth', map_location = 'cpu' )
+model = LenNet()
+for key, val in model.state_dict().items():
+
+    print(key)
+
 
 

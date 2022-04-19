@@ -1,13 +1,14 @@
 */*/runs
-*/*/test
 */*/data
 */*/test.py
 */*/*.pth
 */*/*.json
+*/*/*.txt
 */*/weights
 */*/data_set
 */*/plot_img
 */*/__pycache__
+*/*/*/__pycache__
 */DataSet
 */segmenter
 

@@ -83,7 +83,7 @@ def main(args):
                                                   batch_size  = batch_size,
                                                   shuffle     = True,
                                                   pin_memory  = True,
-                                                  num_workers = nw, #type: ignore
+                                                  num_workers = 0, #type: ignore
                                                   collate_fn  = train_data_set.collate_fn
                                               )
     val_loader   = torch.utils.data.DataLoader(
@@ -91,7 +91,7 @@ def main(args):
                                                   batch_size  = batch_size,
                                                   shuffle     = False,
                                                   pin_memory  = True,
-                                                  num_workers = nw, #type: ignore
+                                                  num_workers = 0, #type: ignore
                                                   collate_fn  = train_data_set.collate_fn
                                               )# }}}
 
@@ -105,6 +105,7 @@ def main(args):
 
         weights_dict = torch.load( args.weights, map_location = device )['model']
 
+        print(weights_dict.keys())
         # 删除有关分类的权重
         for k in list( weights_dict.keys() ):
 
@@ -171,9 +172,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument( '--num_classes'  , type = int  , default = 5      )
     parser.add_argument( '--epochs'       , type = int  , default = 3      )
-    parser.add_argument( '--batch-size'   , type = int  , default = 8      )
+    parser.add_argument( '--batch-size'   , type = int  , default = 2      )
     parser.add_argument( '--lr'           , type = float, default = 0.0001 )
-    parser.add_argument( '--freeze-layers', type = bool , default = False  )
+    parser.add_argument( '--freeze-layers', type = bool , default = False   )
     parser.add_argument( '--weights'      , type = str  , default = './swin_tiny_patch4_window7_224.pth', help = 'initial weights path' )
     parser.add_argument( '--data-path'    , type = str  , default = '../DataSet/flower_data/flower_photos' )
     parser.add_argument( '--device'       , type = str  , default = 'cuda', help = 'device id ( i.e. 0 or 0, 1 or cpu )' )

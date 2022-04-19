@@ -591,7 +591,7 @@ class SwinTransformer(nn.Module):# {{{
                     window_size = 7           , mlp_ratio      = 4.            , qkv_bias        = True            , 
                     drop_rate   = 0.          , attn_drop_rate = 0.            , drop_path_rate  = 0.1             ,
                     norm_layer  = nn.LayerNorm, patch_norm     = True          , use_checkpoint  = False           , 
-                    **kwargs
+                    out_indices=(0, 1, 2, 3)  , **kwargs
                 ):
 
         super().__init__()
@@ -600,9 +600,10 @@ class SwinTransformer(nn.Module):# {{{
         self.num_layers   = len(depths)
         self.embed_dim    = embed_dim
         self.patch_norm   = patch_norm
+        self.out_indices  = out_indices
 
         # stage4 输出的特征矩阵的channels
-        self.num_features = int( embed_dim * 2 ** ( self.num_layers - 1 ) ) 
+        self.num_features = [ int( embed_dim * 2 ** i ) for i in range( self.num_layers ) ]
         self.mlp_ratio    = mlp_ratio
          
         # 将图片划分为没有重叠的patch.
@@ -643,9 +644,9 @@ class SwinTransformer(nn.Module):# {{{
 
         # ----------- 分类任务 -------------
             
-        self.norm    = norm_layer( self.num_features )
+        self.norm    = norm_layer( self.num_features[ self.num_layers - 1 ] )
         self.avgpool = nn.AdaptiveAvgPool1d(1)
-        self.head    = nn.Linear( self.num_features, num_classes ) if num_classes > 0 else nn.Identity() 
+        self.head    = nn.Linear( self.num_features[ self.num_layers - 1 ], num_classes ) if num_classes > 0 else nn.Identity() 
 
         # ----------------------------------
 
@@ -672,9 +673,18 @@ class SwinTransformer(nn.Module):# {{{
         x, H, W = self.patch_embed(x) 
         x       = self.pos_drop(x)
 
-        for layer in self.layers:
+        layers_out = []
 
+        for i in range(self.num_layers):
+
+            layer = self.layers[i]
             x, H, W = layer( x, H, W )
+
+            if i in self.out_indices:
+
+                layer_out = x.view( -1, H, W, self.num_features[i] ).permute( 0, 3, 1, 2 ).contiguous()
+                layers_out.append(layer_out)
+            
 
         # ----------- 分类任务 -------------
 

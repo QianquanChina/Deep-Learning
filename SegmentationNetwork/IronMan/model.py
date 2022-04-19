@@ -3,6 +3,7 @@ import numpy as np
 import torch.nn as nn
 from typing import Optional
 import torch.nn.functional as F
+from unet import Up, DoubleConv, OutConv
 from torch.nn.parameter import Parameter
 import torch.utils.checkpoint as checkpoint
 
@@ -33,6 +34,7 @@ class DropPath(nn.Module):# {{{
         return drop_path_f( x, self.drop_prob, self.training )# }}}
 
 def window_partition(x, window_size : int):# {{{
+
     """
         将feature map 划分成一个个没有重叠的windows
 
@@ -133,8 +135,8 @@ class PatchMerging(nn.Module):# {{{
         super().__init__()
 
         self.dim       = dim
-        self.reduction = nn.Linear( 4 * dim, 2 * dim, bias = False )
         self.norm      = norm_layer( 4 * dim )
+        self.reduction = nn.Linear( 4 * dim, 2 * dim, bias = False )
 
     def forward(self, x, H, W):
         
@@ -369,6 +371,7 @@ class SwinTransformerBlock(nn.Module):# {{{
     def forward(self, x, attn_mask):
 
         """ Forward function.
+
            Args:
                 x: Input feature, tensor size (B, H*W, C).
                 H, W: Spatial resolution of the input feature.
@@ -591,7 +594,7 @@ class SwinTransformer(nn.Module):# {{{
                     window_size = 7           , mlp_ratio      = 4.            , qkv_bias        = True            , 
                     drop_rate   = 0.          , attn_drop_rate = 0.            , drop_path_rate  = 0.1             ,
                     norm_layer  = nn.LayerNorm, patch_norm     = True          , use_checkpoint  = False           , 
-                    **kwargs
+                    out_indices=(0, 1, 2, 3)  , **kwargs
                 ):
 
         super().__init__()
@@ -600,9 +603,11 @@ class SwinTransformer(nn.Module):# {{{
         self.num_layers   = len(depths)
         self.embed_dim    = embed_dim
         self.patch_norm   = patch_norm
+        self.out_indices  = out_indices
 
         # stage4 输出的特征矩阵的channels
-        self.num_features = int( embed_dim * 2 ** ( self.num_layers - 1 ) ) 
+        #self.num_features = [ int( embed_dim * 2 ** i ) for i in range( self.num_layers ) ]
+        self.num_features = [ 256, 512, 1024, 1024 ]
         self.mlp_ratio    = mlp_ratio
          
         # 将图片划分为没有重叠的patch.
@@ -625,7 +630,7 @@ class SwinTransformer(nn.Module):# {{{
 
             # 这里的stage不包含本层的stage的patch_merging，包含下层的patch_merging
             layers = BasicLayer(
-                                  dim            = int( embed_dim * 2 ** i_layer ),
+                                  dim            = int( embed_dim * ( 2 ** i_layer ) ),
                                   depth          = depths[i_layer],
                                   num_heads      = num_heads[i_layer],
                                   window_size    = window_size,
@@ -641,13 +646,19 @@ class SwinTransformer(nn.Module):# {{{
 
             self.layers.append(layers)
 
-        # ----------- 分类任务 -------------
-            
-        self.norm    = norm_layer( self.num_features )
-        self.avgpool = nn.AdaptiveAvgPool1d(1)
-        self.head    = nn.Linear( self.num_features, num_classes ) if num_classes > 0 else nn.Identity() 
+        # -------------分割任务------------
 
-        # ----------------------------------
+        # 将最后输出的进行下采样
+        self.maxpool = nn.MaxPool2d( 2, stride = 2 )
+        self.in_conv = DoubleConv( 3, 128 )
+
+        self.up1 = Up( 2048, 512, bilinear = True ) 
+        self.up2 = Up( 1024, 256, bilinear = True ) 
+        self.up3 = Up( 512,  128, bilinear = True )  
+        self.up4 = Up( 256,  128, bilinear = True ) 
+        self.out_conv = OutConv(128, num_classes)
+
+        # ---------------------------------
 
         self.apply( self._init_weights ) 
 
@@ -668,27 +679,38 @@ class SwinTransformer(nn.Module):# {{{
 
     def forward(self, x):
         
+        x1 = self.in_conv(x)
+
         # x : [ B, C, H, W ] -> [ B, HW, C ]
         x, H, W = self.patch_embed(x) 
         x       = self.pos_drop(x)
-        
-        layer_out = []
-        for layer in self.layers:
 
+        layers_out = []
+
+        for i in range(self.num_layers):
+
+            layer = self.layers[i]
             x, H, W = layer( x, H, W )
+            
+            # 得到每一层的feature map
+            if i in self.out_indices:
 
-        # ----------- 分类任务 -------------
+                layer_out = x.view(-1, H, W, self.num_features[i]).permute(0, 3, 1, 2).contiguous()
+                layers_out.append(layer_out)
+            
 
-        x = self.norm(x) # x : [ B, HW, C ]
-
-        # transpose : [ B, HW, C ] -> [ B, C, HW ] , avgpool : [ B, C, HW ] -> [ B, C, 1 ]
-        x = self.avgpool( x.transpose( 1, 2 ) )
-        x = torch.flatten( x, 1 )
-        x = self.head(x)
+        # ----------- 分割任务 -------------
+        
+        x = self.maxpool( layers_out[3] )
+        x = self.up1( x, layers_out[2] )
+        x = self.up2( x, layers_out[1] )
+        x = self.up3( x, layers_out[0] )
+        x = self.up4( x, x1            )
+        logits = self.out_conv(x)
 
         # ----------------------------------
 
-        return x# }}}
+        return { "out" : logits } # }}}
 
 def swin_tiny_patch4_window7_224(num_classes : int = 1000, **kwargs):# {{{
 
@@ -705,3 +727,17 @@ def swin_tiny_patch4_window7_224(num_classes : int = 1000, **kwargs):# {{{
 
     return model# }}}
 
+def swin_base_patch4_window7_224(num_classes : int = 1000, **kwargs):# {{{
+
+    model = SwinTransformer( 
+                               in_chans     = 3, 
+                               patch_size   = 4,
+                               window_size  = 7,
+                               embed_dim    = 128,
+                               depths       = ( 2, 2, 2, 2 ),
+                               num_heads    = ( 4, 8, 16, 32 ),
+                               num_classes  = num_classes,
+                               **kwargs
+                           )
+
+    return model# }}}
