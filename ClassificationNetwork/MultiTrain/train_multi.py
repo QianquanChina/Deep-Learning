@@ -11,7 +11,7 @@ from torchvision import transforms
 import torch.optim.lr_scheduler as lr_scheduler
 from distributed_utils import init_distributed_mode, dist, cleanup
 from train_eval_utils import evaluate, train_one_epoch
-from data_utils import plot_class_preds, read_split_data
+from data_utils import read_split_data
 from torch.utils.tensorboard.writer import SummaryWriter
 
 def main(args):
@@ -30,11 +30,11 @@ def main(args):
     args.lr     *= args.world_size
 
     # 在第一进程中打印信息，并实例化Tensorboard。
-    tb_writer = SummaryWriter()
     if rank == 0:
 
         print(args)
         print( ' Start Tensorboard with "tensorboard --logdir=runs", view at http://localhost:6006/' )
+        tb_writer = SummaryWriter()
 
         if os.path.exists('./weights') is False:
        
@@ -204,18 +204,18 @@ def main(args):
         if rank == 0:
 
             tags = [ 'loss', 'accuracy', 'learning_rate' ]
-            tb_writer.add_scalar( tags[0], mean_loss, epoch )
-            tb_writer.add_scalar( tags[1], acc, epoch )
-            tb_writer.add_scalar( tags[2], optimizer.param_groups[0]['lr'], epoch )
+            tb_writer.add_scalar( tags[0], mean_loss, epoch ) # type: ignore
+            tb_writer.add_scalar( tags[1], acc, epoch ) # type: ignore 
+            tb_writer.add_scalar( tags[2], optimizer.param_groups[0]['lr'], epoch ) # type: ignore 
 
         # 如果在一句在前面会丢失最后一次的上传数据
             torch.save( model.state_dict(), './weights/model-{}.pth'.format(epoch) )# }}}
 
     if rank == 0:
 
-        if os.path.exists(checkpoint_path) is True: 
+        if os.path.exists(checkpoint_path) is True: # type: ignore
 
-            os.remove(checkpoint_path)
+            os.remove(checkpoint_path) # type: ignore
 
     cleanup()
 
