@@ -3,7 +3,6 @@ import numpy as np
 import torch.nn as nn
 from typing import Optional
 import torch.nn.functional as F
-from unet import Up, DoubleConv, OutConv
 from torch.nn.parameter import Parameter
 import torch.utils.checkpoint as checkpoint
 
@@ -86,6 +85,7 @@ class PatchEmbedb(nn.Module):# {{{
     def __init__(self, patch_size = 4, in_c = 3, embed_dim = 96, norm_layer = None):
 
         super().__init__()
+
         patch_size      = ( patch_size, patch_size )
         self.patch_size = patch_size
         self.in_chans   = in_c
@@ -96,6 +96,7 @@ class PatchEmbedb(nn.Module):# {{{
     def forward(self, x):
 
         _, _, H, W, = x.shape
+        origin_H, origin_W = H, W
 
         # 如果输入的图片H，W不是patch_size的整数倍就要padding
         if H % self.patch_size[0] != 0:
@@ -119,7 +120,7 @@ class PatchEmbedb(nn.Module):# {{{
         x = x.flatten(2).transpose( 1, 2 )
         x = self.norm(x)
 
-        return x, H, W# }}}
+        return x, H, W, origin_H, origin_W# }}}
 
 class PatchMerging(nn.Module):# {{{
 
@@ -156,7 +157,7 @@ class PatchMerging(nn.Module):# {{{
         pad_input = ( H % 2 == 1 ) or ( W % 2 == 1 )
 
         if pad_input:
-            
+
             x = F.pad( x, ( 0, 0, 0, W % 2, 0, H % 2) )
 
 
@@ -174,6 +175,74 @@ class PatchMerging(nn.Module):# {{{
 
         # x : [ B, H/2*W/2, 4*C ] -> [ B, H/2*W/2, 2*C ] 
         x  = self.reduction(x)
+
+        return x# }}}
+
+class PatchExpanding(nn.Module):# {{{
+
+    def __init__(self, dim, dim_scale = 2, norm_layer = nn.LayerNorm):
+
+        super().__init__()
+
+        self.dim       = dim 
+        self.dim_scale = dim_scale
+        self.up        = nn.Upsample( scale_factor = 2, mode = 'bilinear', align_corners = True )
+        self.expand    = nn.Linear( dim, dim // dim_scale, bias = False )
+        self.norm      = norm_layer( dim // dim_scale )
+
+    def forward(self, x, H, W):
+
+        """
+            x : [ B HW C ] 
+
+        """
+        _, L, _ = x.shape        
+
+        assert L == H * W, 'input feature has wrong size'
+
+        # x : [ B, HW, C ] -> [ B C H W ]
+        x = x.view( -1, H, W, self.dim ).permute(0, 3, 1, 2).contiguous()
+        x = self.up(x)
+
+        # x : [ B C H W ] -> [ B, HW, C ]
+        x = x.flatten(2).transpose( 1, 2 )
+
+        x = self.expand(x)
+        x = self.norm(x)
+
+        return x# }}}
+
+class PatchExpanding_X4(nn.Module):# {{{
+
+    def __init__(self, dim, dim_scale = 4, norm_layer = nn.LayerNorm):
+
+        super().__init__()
+
+        self.dim       = dim 
+        self.dim_scale = dim_scale
+        self.up        = nn.Upsample( scale_factor = 4, mode = 'bilinear', align_corners = True )
+        self.expand    = nn.Linear( dim, dim // dim_scale, bias = False )
+        self.norm      = norm_layer( dim // dim_scale )
+
+    def forward(self, x, H, W):
+
+        """
+            x : [ B HW C ] 
+
+        """
+        _, L, _ = x.shape        
+
+        assert L == H * W, 'input feature has wrong size'
+
+        # x : [ B, HW, C ] -> [ B C H W ]
+        x = x.view( -1, H, W, self.dim ).permute( 0, 3, 1, 2 ).contiguous()
+        x = self.up(x)
+
+        # x : [ B C H W ] -> [ B, HW, C ]
+        x = x.flatten(2).transpose( 1, 2 )
+
+        x = self.expand(x)
+        x = self.norm(x)
 
         return x# }}}
 
@@ -405,15 +474,15 @@ class SwinTransformerBlock(nn.Module):# {{{
            attn_mask = None
 
         # partition windows
-        x_windows = window_partition( shifted_x, self.window_size )             # [ nW*B, window_size, window_size, C ]
-        x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # [ nW*B, window_size*window_size , C ]
+        x_windows = window_partition( shifted_x, self.window_size )               # [ nW*B, window_size, window_size, C ]
+        x_windows = x_windows.view( -1, self.window_size * self.window_size, C )  # [ nW*B, window_size*window_size , C ]
 
         # W-MSA/SW-MSA
-        attn_windows = self.attn(x_windows, mask=attn_mask)  # [ nW*B, window_size*window_size, C ]
+        attn_windows = self.attn( x_windows, mask = attn_mask )                   # [ nW*B, window_size*window_size, C ]
 
         # merge windows
-        attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C) # [ nW*B, Mh, Mw, C ]
-        shifted_x = window_reverse(attn_windows, self.window_size, Hp, Wp)          # [ B H' W' C ]
+        attn_windows = attn_windows.view( -1, self.window_size, self.window_size, C ) # [ nW*B, Mh, Mw, C ]
+        shifted_x = window_reverse( attn_windows, self.window_size, Hp, Wp )          # [ B H' W' C ]
 
         # reverse cyclic shift
         if self.shift_size > 0:
@@ -437,7 +506,7 @@ class SwinTransformerBlock(nn.Module):# {{{
 
         return x# }}}
 
-class BasicLayer(nn.Module):# {{{
+class BasicLayerDown(nn.Module):# {{{
 
     def __init__( 
                     self,
@@ -548,6 +617,139 @@ class BasicLayer(nn.Module):# {{{
 
         for blk in self.blocks:
             
+            # 给当前的block添加H W的属性 用来做attention使用.
+            blk.H, blk.W = H, W 
+
+            if self.use_checkpoint:
+
+                x = checkpoint.checkpoint( blk, x, attn_mask )
+            
+            else:
+
+                x = blk( x, attn_mask )
+
+        block_x = x
+        block_H, block_W = H , W  
+
+        if self.downsample is not None:
+ 
+            x    = self.downsample( x, H, W )
+            H, W = ( H + 1 ) // 2, ( W + 1 ) // 2
+        
+        return x, H, W, block_x, block_H, block_W# }}}
+
+class BasicLayerUp(nn.Module):# {{{
+
+    def __init__( 
+                    self,
+                    dim , 
+                    depth,
+                    num_heads, 
+                    window_size,
+                    mlp_ratio      = 4.,
+                    qkv_bias       = True,
+                    drop           = 0.,
+                    attn_drop      = 0.,
+                    drop_path      = 0.,
+                    norm_layer     = nn.LayerNorm,
+                    upsample       = None,
+                    use_checkpoint = False
+                ):
+        
+        super().__init__()
+
+        self.dim            = dim 
+        self.depth          = depth
+        self.window_size    = window_size
+        self.use_checkpoint = use_checkpoint
+        self.shift_size     = window_size // 2
+
+        # build blocks
+        self.blocks = nn.ModuleList(
+                                       [
+                                           SwinTransformerBlock(
+                                                                   dim         = dim,
+                                                                   num_heads   = num_heads,
+                                                                   window_size = window_size,
+                                                                   shift_size  = 0 if ( i % 2 == 0 ) else self.shift_size,
+                                                                   mlp_ratio   = mlp_ratio,
+                                                                   qkv_bias    = qkv_bias,
+                                                                   drop        = drop,
+                                                                   attn_drop   = attn_drop,
+                                                                   drop_path   = drop_path[i] if isinstance( drop_path, list) else drop_path,
+                                                                   norm_layer  = norm_layer
+
+                                                               )
+
+                                           for i in range(depth)
+
+                                       ]    
+
+                                   )
+
+        # patch merging layer
+        if upsample is not None:
+
+            self.upsample = upsample( dim = dim, dim_scale = 2, norm_layer = norm_layer )
+
+        else:
+
+            self.upsample = None
+
+    def create_mask(self, x, H, W):
+
+        """
+                计算SW-MSA的掩码
+
+        """
+        # 保证Hp Wp是windows_size的整数倍
+        Hp = int( np.ceil( H / self.window_size ) ) * self.window_size
+        Wp = int( np.ceil( W / self.window_size ) ) * self.window_size
+
+        # 拥有和feature map 一样的通道顺序，方便后续的windows_partition
+        img_mask = torch.zeros( (1, Hp, Wp, 1 ), device = x.device )  # 1 Hp Wp 1
+
+        h_slices = ( 
+                       slice( 0, -self.window_size ),
+                       slice( -self.window_size, -self.shift_size ),
+                       slice( -self.shift_size, None )
+                   )
+                       
+        w_slices = (
+                       slice( 0, -self.window_size ),
+                       slice( -self.window_size, -self.shift_size ),
+                       slice( -self.shift_size, None )
+                   )
+        cnt = 0
+
+        for h in h_slices:
+
+            for w in w_slices:
+
+                img_mask[ :, h, w, : ] = cnt
+
+                cnt += 1
+
+        # 将img_mask分成所需要的window 因为img_mask的第一维度是1所以nW就是window的个数.
+        mask_windows = window_partition( img_mask, self.window_size )  # [ nW, window_size, window_size, 1 ]
+        mask_windows = mask_windows.view( -1, self.window_size * self.window_size ) #[ nW, Mh*Mw ]
+        attn_mask    = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
+        attn_mask    = attn_mask.masked_fill( attn_mask != 0, float(-100.0) ).masked_fill( attn_mask == 0, float(0.0) )
+
+        return attn_mask
+
+    def forward(self, x, H, W):
+
+        """
+            args:
+                x : [ B, HW, C ].
+
+        """
+        attn_mask = self.create_mask( x, H, W )
+
+
+        for blk in self.blocks:
+
             # 给当前的block添加H W的属性.
             blk.H, blk.W = H, W 
 
@@ -559,12 +761,12 @@ class BasicLayer(nn.Module):# {{{
 
                 x = blk( x, attn_mask )
 
-        if self.downsample is not None:
+        if self.upsample is not None:
 
-            x    = self.downsample( x, H, W )
-            H, W = ( H + 1 ) //2, ( W + 1 ) // 2
+            x = self.upsample(x, H, W)
+            H, W =  H * 2,  W * 2
 
-        return x, H, W# }}}
+        return x, H, W # }}}
 
 class SwinTransformer(nn.Module):# {{{
 
@@ -573,7 +775,7 @@ class SwinTransformer(nn.Module):# {{{
             patch_size     : 下采样的倍数.
             in_chans       : 输入图片的通道.
             num_classses   : 分类的个数.
-            depths         : 每层stage中SwinTransformerBlock的重复次数.
+            down_depths    : 每层stage中SwinTransformerBlock的重复次数.
             num_head       : Mutil Head Self Attention中head的个数.
             window_size    : Window Mutil Head Self Attention 中窗口的大小.
             mlp_ratio     : SwinTransformerBlock中的MLP层中第一个全连接层将我们的channel翻的倍数. 
@@ -588,28 +790,28 @@ class SwinTransformer(nn.Module):# {{{
     """
 
     def __init__(
-                    self,
-                    patch_size  = 4           , in_chans       = 3             , num_classes    = 1000             ,
-                    embed_dim   = 96          , depths         = ( 2, 2, 6, 2 ), num_heads       = ( 3, 6, 12, 24 ),
-                    window_size = 7           , mlp_ratio      = 4.            , qkv_bias        = True            , 
-                    drop_rate   = 0.          , attn_drop_rate = 0.            , drop_path_rate  = 0.1             ,
-                    norm_layer  = nn.LayerNorm, patch_norm     = True          , use_checkpoint  = False           , 
-                    out_indices=(0, 1, 2, 3)  , **kwargs
+                    self,                               
+                    image_size     = 480           , patch_size      = 4               , in_chans       = 3             , 
+                    num_classes    = 1000          , embed_dim       = 96              , depths_down    = ( 2, 2, 6, 2 ), 
+                    depths_up      = ( 2, 2, 6, 2 ), num_heads       = ( 3, 6, 12, 24 ), window_size    = 7             , 
+                    mlp_ratio      = 4.            , qkv_bias        = True            , drop_rate      = 0.            , 
+                    attn_drop_rate = 0.            , drop_path_rate  = 0.1             , norm_layer     = nn.LayerNorm  ,  
+                    patch_norm     = True          , use_checkpoint  = False           , out_indices    = (0, 1, 2, 3)  , 
+                    **kwargs
                 ):
 
-        super().__init__()
+        super().__init__() 
         
-        self.num_classes  = num_classes
-        self.num_layers   = len(depths)
-        self.embed_dim    = embed_dim
-        self.patch_norm   = patch_norm
-        self.out_indices  = out_indices
+        self.image_size        = image_size
+        self.num_classes       = num_classes
+        self.num_layers_down   = len(depths_down)
+        self.num_layers_up     = len(depths_up)
+        self.embed_dim         = embed_dim
+        self.patch_norm        = patch_norm
+        self.out_indices       = out_indices
+        self.num_features_down = [ int( embed_dim * 2 ** i ) for i in range( self.num_layers_down ) ]
+        self.mlp_ratio         = mlp_ratio
 
-        # stage4 输出的特征矩阵的channels
-        #self.num_features = [ int( embed_dim * 2 ** i ) for i in range( self.num_layers ) ]
-        self.num_features = [ 256, 512, 1024, 1024 ]
-        self.mlp_ratio    = mlp_ratio
-         
         # 将图片划分为没有重叠的patch.
         self.patch_embed  = PatchEmbedb(
                                           patch_size = patch_size, 
@@ -621,44 +823,64 @@ class SwinTransformer(nn.Module):# {{{
         self.pos_drop = nn.Dropout( p = drop_rate )
         
         # 对不同的TransformerBlock生成不同的dpr
-        dpr = [ x.item() for x in torch.linspace( 0, drop_path_rate, sum(depths) ) ]
+        dpr = [ x.item() for x in torch.linspace( 0, drop_path_rate, sum(depths_down) ) ]
 
         self.layers = nn.ModuleList()
 
-        # build layers
-        for i_layer in range( self.num_layers ):
+        # build encode layers
+        for i_layer in range( self.num_layers_down ):
 
             # 这里的stage不包含本层的stage的patch_merging，包含下层的patch_merging
-            layers = BasicLayer(
-                                  dim            = int( embed_dim * ( 2 ** i_layer ) ),
-                                  depth          = depths[i_layer],
-                                  num_heads      = num_heads[i_layer],
-                                  window_size    = window_size,
-                                  mlp_ratio      = self.mlp_ratio,
-                                  qkv_bias       = qkv_bias,
-                                  drop           = drop_rate,
-                                  attn_drop      = attn_drop_rate,
-                                  drop_path      = dpr[ sum( depths[ : i_layer ] ) : sum( depths[ : i_layer + 1 ] ) ],
-                                  norm_layer     = norm_layer,
-                                  downsample     = PatchMerging if ( i_layer < self.num_layers - 1 ) else None,
-                                  use_checkpoint = use_checkpoint
-                               )
+            layer = BasicLayerDown(
+                                      dim            = int( embed_dim * ( 2 ** i_layer ) ),
+                                      depth          = depths_down[i_layer],
+                                      num_heads      = num_heads[i_layer],
+                                      window_size    = window_size,
+                                      mlp_ratio      = self.mlp_ratio,
+                                      qkv_bias       = qkv_bias,
+                                      drop           = drop_rate,
+                                      attn_drop      = attn_drop_rate,
+                                      drop_path      = dpr[ sum( depths_down[ : i_layer ] ) : sum( depths_down[ : i_layer + 1 ] ) ],
+                                      norm_layer     = norm_layer,
+                                      downsample     = PatchMerging if ( i_layer < self.num_layers_down - 1 ) else None,
+                                      use_checkpoint = use_checkpoint
+                                   )
 
-            self.layers.append(layers)
+            self.layers.append(layer)
 
-        # -------------分割任务------------
+        # build decoder layers 
+        self.layers_up  = nn.ModuleList()
+        self.concat_dim = nn.ModuleList()
 
-        # 将最后输出的进行下采样
-        self.maxpool = nn.MaxPool2d( 2, stride = 2 )
-        self.in_conv = DoubleConv( 3, 128 )
+        for i_layer in range( self.num_layers_up ):
 
-        self.up1 = Up( 2048, 512, bilinear = True ) 
-        self.up2 = Up( 1024, 256, bilinear = True ) 
-        self.up3 = Up( 512,  128, bilinear = True )  
-        self.up4 = Up( 256,  128, bilinear = True ) 
-        self.out_conv = OutConv(128, num_classes)
+            # 线性映射
+            concat_liner = nn.Linear(
+                                        2 * int( embed_dim * 2 ** ( self.num_layers_up - 1 - i_layer ) ), 
+                                        int( embed_dim * 2 ** ( self.num_layers_up - 1 - i_layer ) )
+                                    ) if i_layer > 0 else nn.Identity()
 
-        # ---------------------------------
+            layer_up = BasicLayerUp(
+                                       dim            = int( embed_dim *  2 ** ( self.num_layers_up - 1 - i_layer ) ) ,
+                                       depth          = depths_down[i_layer],
+                                       num_heads      = num_heads[i_layer],
+                                       window_size    = window_size,
+                                       mlp_ratio      = self.mlp_ratio,
+                                       qkv_bias       = qkv_bias,
+                                       drop           = drop_rate,
+                                       attn_drop      = attn_drop_rate,
+                                       drop_path      = dpr[ sum( depths_down[ : i_layer ] ) : sum( depths_down[ : i_layer + 1 ] ) ],
+                                       norm_layer     = norm_layer,
+                                       upsample       = PatchExpanding if ( i_layer < self.num_layers_up - 1 ) else None,
+                                       use_checkpoint = use_checkpoint
+                                   )
+
+            self.layers_up.append(layer_up)
+            self.concat_dim.append(concat_liner)
+
+            # 最后的上采样
+            self.up     = PatchExpanding_X4( dim = embed_dim, dim_scale = 4)
+            self.output = nn.Conv2d( in_channels = 32, out_channels = self.num_classes, kernel_size = 1, bias = False ) 
 
         self.apply( self._init_weights ) 
 
@@ -679,48 +901,102 @@ class SwinTransformer(nn.Module):# {{{
 
     def forward(self, x):
         
-        x1 = self.in_conv(x)
 
         # x : [ B, C, H, W ] -> [ B, HW, C ]
-        x, H, W = self.patch_embed(x) 
-        x       = self.pos_drop(x)
+        x, H, W, origin_H, origin_W = self.patch_embed(x) 
+        x = self.pos_drop(x)
 
         layers_out = []
+        layers_H   = []
+        layers_W   = []
 
-        for i in range(self.num_layers):
+        # encode
+        for i in range(self.num_layers_down):
 
             layer = self.layers[i]
-            x, H, W = layer( x, H, W )
+            x, H, W, block_x, block_H, block_W = layer( x, H, W )
             
             # 得到每一层的feature map
             if i in self.out_indices:
 
-                layer_out = x.view(-1, H, W, self.num_features[i]).permute(0, 3, 1, 2).contiguous()
-                layers_out.append(layer_out)
+                _, _, block_C = block_x.shape
+
+                # [ B, HW, C ] -> [ B, C, H, W ]
+                block_x = block_x.view( -1, block_H, block_W, block_C ).permute( 0, 3, 1, 2 ).contiguous()
+                layers_out.append(block_x)
+
+                layers_H.append(block_H)
+                layers_W.append(block_W)
+
+        # decoder
+        for i in range(self.num_layers_up):
+
+            layer = self.layers_up[i]
+
+            if i == 0:
+                
+                layers_out[ 3 - i ] = layers_out[ 3 - i ].flatten(2).transpose( 1, 2 )
+                x, H, W = layer( layers_out[ 3 - i ], layers_H[ 3 - i ], layers_W[ 3 - i ] ) 
+                _, _, C = x.shape
+                x = x.view( -1, H, W, C ).permute( 0, 3, 1, 2 ).contiguous()
+
+            else:
+
+                # [B, C, H, W]
+                diff_y = layers_out[ 3 - i ].size()[2] - x.size()[2]  
+                diff_x = layers_out[ 3 - i ].size()[3] - x.size()[3]  
+                # padding_left, padding_right, padding_top, padding_bottom
+                x = F.pad(
+                             x, 
+                             [
+                                 diff_x // 2, 
+                                 diff_x - diff_x // 2,
+                                 diff_y // 2,
+                                 diff_y - diff_y // 2
+                             ]
+                         )
+                _, _, H, W = x.shape
+                x = torch.cat( [ x, layers_out[ 3 - i ] ], dim = 1 )
+                x = x.flatten(2).transpose( 1, 2 )
+                x = self.concat_dim[i](x)
+                x, H, W = layer( x, H, W )
+                _, _, C = x.shape
+                x = x.view( -1, H, W, C ).permute( 0, 3, 1, 2 ).contiguous()
+
+        _, _, H, W = x.shape
+        x = x.flatten(2).transpose( 1, 2 )
+        x = self.up( x, H, W )
+        _, _, C = x.shape
+        x = x.view( -1, 4 * H, 4 * W, C ).permute( 0, 3, 1, 2 ).contiguous()
+        # [B, C, H, W]
+        diff_y = origin_H - x.size()[2]  
+        diff_x = origin_W - x.size()[3]  
+        # padding_left, padding_right, padding_top, padding_bottom
+        x = F.pad(
+                     x, 
+                     [
+                         diff_x // 2, 
+                         diff_x - diff_x // 2,
+                         diff_y // 2,
+                         diff_y - diff_y // 2
+                     ]
+                 )
+        x = self.output(x)
+        logits = x    
             
-
-        # ----------- 分割任务 -------------
-        
-        x = self.maxpool( layers_out[3] )
-        x = self.up1( x, layers_out[2] )
-        x = self.up2( x, layers_out[1] )
-        x = self.up3( x, layers_out[0] )
-        x = self.up4( x, x1            )
-        logits = self.out_conv(x)
-
-        # ----------------------------------
-
         return { "out" : logits } # }}}
 
 def swin_tiny_patch4_window7_224(num_classes : int = 1000, **kwargs):# {{{
 
     model = SwinTransformer( 
-                               in_chans     = 3, 
-                               patch_size   = 4,
-                               window_size  = 7,
-                               embed_dim    = 96,
-                               depths       = ( 2, 2, 6, 2 ),
-                               num_heads    = ( 3, 6, 12, 24 ),
+                               image_size  = 480,
+                               in_chans    = 3, 
+                               patch_size  = 4,
+                               window_size = 7,
+                               embed_dim   = 96,
+                               depths_down = ( 2, 2, 6, 2 ),
+                               depths_up   = ( 2, 2, 6, 2 ),
+                               num_heads   = ( 3, 6, 12, 24 ),
                                num_classes = num_classes,
                                **kwargs
                            )
@@ -730,13 +1006,15 @@ def swin_tiny_patch4_window7_224(num_classes : int = 1000, **kwargs):# {{{
 def swin_base_patch4_window7_224(num_classes : int = 1000, **kwargs):# {{{
 
     model = SwinTransformer( 
-                               in_chans     = 3, 
-                               patch_size   = 4,
-                               window_size  = 7,
-                               embed_dim    = 128,
-                               depths       = ( 2, 2, 2, 2 ),
-                               num_heads    = ( 4, 8, 16, 32 ),
-                               num_classes  = num_classes,
+                               image_size  = 480,
+                               in_chans    = 3, 
+                               patch_size  = 4,
+                               window_size = 7,
+                               embed_dim   = 128,
+                               depths_down = ( 1, 1, 1, 1 ),
+                               depths_up   = ( 1, 1, 1, 1 ),
+                               num_heads   = ( 4, 8, 16, 32 ),
+                               num_classes = num_classes,
                                **kwargs
                            )
 

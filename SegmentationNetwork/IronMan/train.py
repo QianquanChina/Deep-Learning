@@ -5,10 +5,8 @@ import argparse
 import torch.utils.data
 from utils import get_transform
 from my_dataset import VOCSegmentation
-from model import swin_base_patch4_window7_224
+from model import swin_base_patch4_window7_224, swin_tiny_patch4_window7_224
 from train_utils import train_one_epoch, evaluate, create_lr_scheduler
-
-
 
 def main(args):
 
@@ -65,7 +63,7 @@ def main(args):
                                             )# }}}
 
     # 检测是否存在预训练权重，存在则载入
-    model = swin_base_patch4_window7_224( num_classes = args.num_classes ).to( device )# {{{
+    model = swin_base_patch4_window7_224( num_classes = num_classes ).to( device )# {{{
 
     if args.weights != '':
 
@@ -148,7 +146,7 @@ if __name__ == '__main__':
     parser.add_argument( '--epochs'       , type = int  , default = 10     )
     parser.add_argument( '--batch-size'   , type = int  , default = 1      )
     parser.add_argument( '--lr'           , type = float, default = 0.0001 )
-    parser.add_argument( '--freeze-layers', type = bool , default = False  )
+    parser.add_argument( '--freeze-layers', type = bool , default = False   )
     parser.add_argument('--momentum', default = 0.9, type = float, metavar = 'M',help = 'momentum')
     parser.add_argument('--wd', '--weight-decay', default = 1e-4, type = float,metavar = 'W', help = 'weight decay (default: 1e-4)', dest = 'weight_decay')
     parser.add_argument( '--weights'      , type = str  , default = './swin_base_patch4_window7_224.pth', help = 'initial weights path' )

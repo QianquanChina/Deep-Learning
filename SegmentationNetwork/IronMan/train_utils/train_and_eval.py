@@ -16,7 +16,7 @@ def criterion(inputs, target):# {{{
 
         return losses['out']
 
-    return losses['out'] + 0.5 * losses['aux']# }}}
+    return losses['out'] # }}}
 
 def evaluate(model, data_loader, device, num_classes):# {{{
 
@@ -32,6 +32,9 @@ def evaluate(model, data_loader, device, num_classes):# {{{
             image, target = image.to(device), target.to(device)
             output = model( image.to(device) )
             output = output['out']
+
+            print('final----', target.flatten().size, output.argmax(1).flatten().size  )
+            print('image----', image.shape )
 
             confmat.update( target.flatten(), output.argmax(1).flatten() )
 
@@ -54,6 +57,7 @@ def train_one_epoch(model, optimizer, data_loader, device, epoch, lr_scheduler, 
         with torch.cuda.amp.autocast_mode.autocast( enabled = scaler is not None ):
 
             output = model(image)
+            # output 是模型输出的
             loss = criterion( output, target )
 
         optimizer.zero_grad()
@@ -76,7 +80,7 @@ def train_one_epoch(model, optimizer, data_loader, device, epoch, lr_scheduler, 
 
     return metric_logger.meters["loss"].global_avg, lr #type: ignore # }}}
 
-def create_lr_scheduler(optimizer,
+def create_lr_scheduler(optimizer,# {{{
                         num_step: int,
                         epochs: int,
                         warmup=True,
@@ -100,4 +104,4 @@ def create_lr_scheduler(optimizer,
             # 参考deeplab_v2: Learning rate policy
             return (1 - (x - warmup_epochs * num_step) / ((epochs - warmup_epochs) * num_step)) ** 0.9
 
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=f)
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=f)# }}}

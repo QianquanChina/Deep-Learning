@@ -45,9 +45,9 @@ class SegmentationPresetEval:# {{{
 
         self.transforms = T.Compose(
                                        [
-                                           T.RandomResize(base_size, base_size), # type: ignore
+                                           T.RandomResize( base_size, base_size ), # type: ignore
                                            T.ToTensor(),
-                                           T.Normalize(mean=mean, std=std),
+                                           T.Normalize( mean = mean, std = std ),
                                        ]
                                    )
 
